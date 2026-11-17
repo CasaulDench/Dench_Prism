@@ -2,6 +2,7 @@
 import prisma from '@/lib/prisma';
 import { Prisma, ReadingType } from '@prisma/client';
 import { AuditService } from './auditService';
+import { AccountingService } from './accountingService';
 import {
   dayRange,
   dateKeyToDbDate,
@@ -329,6 +330,9 @@ export class DailySalesService {
             remarks,
           },
         });
+
+        // Over/short goes to the general ledger in the same transaction.
+        await AccountingService.postCashCount(tx, record.id);
 
         await AuditService.log(
           {

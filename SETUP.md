@@ -75,6 +75,8 @@ Each role only sees its own area; the other one redirects away.
 | `/inventory` | Raw materials and suppliers |
 | `/pos` | Point of Sale |
 | `/analytics` | Profit analytics |
+| `/daily-sales` | Daily sales, X/Z readings, cash count, vendor split (manager/admin) |
+| `/financial-reports` | Income statement, balance sheet, cash flow, trial balance, chart of accounts, journal (manager/admin) |
 | `/dividends`, `/reports`, `/users`, `/settings` | Placeholder pages |
 
 ### Admin side (`admin` / `admin123`)
@@ -98,6 +100,25 @@ Each role only sees its own area; the other one redirects away.
 | `npm run start` | Serve the production build (run `build` first) |
 | `npm run lint` | Run ESLint |
 | `npx tsc --noEmit` | Type-check without emitting files |
+| `npm run db:seed` | Reset the database to demo data (wipes everything) |
+| `npm run test:financial-reports` | Check the ledger and financial statements (database checks skip if it is down) |
+
+### Financial reports: how the numbers get there
+
+The statements are computed from a double-entry general ledger
+(`Account`, `JournalEntry`, `JournalLine`):
+
+- **POS sales post automatically** at checkout: cash in; canteen sales, the
+  coop's commission on consigned goods, the vendor's share (a payable) and
+  output tax out; plus cost of goods sold at recipe cost.
+- **Cash over/short** from an end-of-shift count posts automatically.
+- **Everything else** (expenses, purchases, capital, depreciation) is a manual
+  journal entry on the Journal tab. Entries are never edited; reverse and re-post.
+- Opening the report page posts any sale or cash count the ledger has not seen
+  yet, so data from before the ledger existed is picked up.
+
+Statement maths lives in `src/lib/accounting/` (pure, tested); the database
+side is `src/services/accountingService.ts`.
 
 ---
 

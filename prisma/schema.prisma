@@ -1,0 +1,319 @@
+// prisma/schema.prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  ADMIN
+  CASHIER
+  MANAGER
+}
+
+model User {
+  id           String        @id @default(cuid())
+  username     String        @unique
+  password     String
+  name         String
+  role         Role          @default(CASHIER)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  transactions Transaction[]
+  auditLogs    AuditLog[]
+
+  salesReadings       SalesReading[]
+  cashCountsAsCashier CashReconciliation[] @relation("CashReconCashier")
+  cashCountsRecorded  CashReconciliation[] @relation("CashReconRecordedBy")
+  journalEntries      JournalEntry[]
+}
+
+model SchoolBranch {
+  id            Int          @id @default(autoincrement())
+  name          String
+  address       String
+  level         String // Elementary, High School, College
+  monthlyProfit Decimal      @default(0.00) @db.Decimal(10, 2)
+  stockStatus   String       @default("In Stock") // In Stock, Low Stock, Stock Out
+  members       CoopMember[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model CoopMember {
+  id                   Int           @id @default(autoincrement())
+  memberCode           String        @unique
+  fullName             String
+  email                String?
+  phone                String?
+  branchId             Int
+  branch               SchoolBranch  @relation(fields: [branchId], references: [id])
+  status               String        @default("ACTIVE") // ACTIVE, INACTIVE
+  shareCapital         Decimal       @default(0.00) @db.Decimal(10, 2)
+  accumulatedPatronage Decimal       @default(0.00) @db.Decimal(10, 2)
+  transactions         Transaction[]
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+}
+
+model Product {
+  id               Int                 @id @default(autoincrement())
+  name             String
+  sku              String              @unique
+  category         String
+  price            Decimal             @db.Decimal(10, 2)
+  stock            Int                 @default(0)
+  image            String?
+  vendorId         Int? // null = coop-owned product (100% coop revenue)
+  vendor           Vendor?             @relation(fields: [vendorId], references: [id])
+  ingredients      ProductIngredient[]
+  transactionItems TransactionItem[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+}
+
+model InventoryItem {
+  id                 Int                 @id @default(autoincrement())
+  name               String
+  packaging          String
+  sku                String              @unique
+  category           String
+  supplier           String
+  deliveryDays       String
+  price              Decimal             @db.Decimal(10, 2)
+  stock              Decimal             @default(0.000) @db.Decimal(10, 3)
+  unit               String
+  status             String              @default("Optimal") // Optimal, Low Stock, Empty
+  productIngredients ProductIngredient[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+}
+
+model ProductIngredient {
+  id               Int           @id @default(autoincrement())
+  productId        Int
+  inventoryItemId  Int
+  quantityRequired Decimal       @db.Decimal(10, 3)
+  product          Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  inventoryItem    InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  createdAt        DateTime      @default(now())
+
+  @@unique([productId, inventoryItemId])
+}
+
+model Transaction {
+  id                String            @id @default(cuid())
+  transactionNumber String            @unique
+  cashierId         String
+  cashier           User              @relation(fields: [cashierId], references: [id])
+  memberId          Int?
+  member            CoopMember?       @relation(fields: [memberId], references: [id])
+  subtotal          Decimal           @db.Decimal(10, 2)
+  taxAmount         Decimal           @db.Decimal(10, 2)
+  totalAmount       Decimal           @db.Decimal(10, 2)
+  paymentMethod     String            @default("CASH")
+  status            String            @default("COMPLETED") // COMPLETED, VOIDED
+  items             TransactionItem[]
+  journalEntry      JournalEntry?
+  createdAt         DateTime          @default(now())
+}
+
+model TransactionItem {
+  id            Int         @id @default(autoincrement())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  productId     Int
+  product       Product     @relation(fields: [productId], references: [id])
+  quantity      Int
+  unitPrice     Decimal     @db.Decimal(10, 2)
+  subtotal      Decimal     @db.Decimal(10, 2)
+
+  // Vendor split snapshot, frozen at time of sale so later rate changes
+  // never rewrite historical settlements. Both null = coop-owned item.
+  vendorId         Int?
+  vendor           Vendor?  @relation(fields: [vendorId], references: [id])
+  coopSharePercent Decimal? @db.Decimal(5, 2)
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String
+  entityId   String?
+  details    String?
+  timestamp  DateTime @default(now())
+}
+
+// ─── Daily Sales & Reconciliation ────────────────────────────────────────────
+
+/// Concessionaire / consignor whose goods are sold through the canteen POS.
+/// The coop keeps `coopSharePercent` of the vendor's net (pre-tax) sales;
+/// the remainder is payable to the vendor.
+model Vendor {
+  id               Int               @id @default(autoincrement())
+  name             String            @unique
+  contactPerson    String?
+  phone            String?
+  coopSharePercent Decimal           @db.Decimal(5, 2) // e.g. 15.00 = coop keeps 15%
+  status           String            @default("ACTIVE") // ACTIVE, INACTIVE
+  products         Product[]
+  transactionItems TransactionItem[]
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+}
+
+enum ReadingType {
+  X // Mid-day snapshot. Any number per day, does not close the day.
+  Z // End-of-day reading. Exactly one per business date; advances the grand total.
+}
+
+/// Immutable POS sales reading (X/Z). Figures are snapshotted at generation time.
+model SalesReading {
+  id            String      @id @default(cuid())
+  type          ReadingType
+  readingNumber Int
+  businessDate  DateTime    @db.Date
+  /// Set only for Z readings. Unique, so the database itself guarantees one Z per day.
+  zDate         DateTime?   @unique @db.Date
+  generatedById String
+  generatedBy   User        @relation(fields: [generatedById], references: [id])
+
+  transactionCount    Int
+  firstTransactionNo  String?
+  lastTransactionNo   String?
+  grossSales          Decimal @db.Decimal(12, 2) // sum of totalAmount (tax-inclusive)
+  netSales            Decimal @db.Decimal(12, 2) // sum of subtotal (net of tax)
+  taxAmount           Decimal @db.Decimal(12, 2)
+  voidCount           Int
+  voidAmount          Decimal @db.Decimal(12, 2)
+  beginningGrandTotal Decimal @db.Decimal(14, 2)
+  endingGrandTotal    Decimal @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now())
+
+  @@unique([type, readingNumber])
+  @@index([businessDate])
+}
+
+/// End-of-shift cash count for one cashier on one business date.
+/// variance = countedCash - expectedCash  (positive = cash over, negative = short)
+model CashReconciliation {
+  id           String   @id @default(cuid())
+  businessDate DateTime @db.Date
+  cashierId    String
+  cashier      User     @relation("CashReconCashier", fields: [cashierId], references: [id])
+  recordedById String
+  recordedBy   User     @relation("CashReconRecordedBy", fields: [recordedById], references: [id])
+
+  openingFund   Decimal       @db.Decimal(10, 2)
+  cashSales     Decimal       @db.Decimal(12, 2)
+  expectedCash  Decimal       @db.Decimal(12, 2)
+  countedCash   Decimal       @db.Decimal(12, 2)
+  variance      Decimal       @db.Decimal(12, 2)
+  status        String // OVER, SHORT, BALANCED
+  denominations Json // { "1000": 3, "500": 2, ... } piece counts
+  remarks       String?
+  journalEntry  JournalEntry?
+
+  createdAt DateTime @default(now())
+
+  @@unique([businessDate, cashierId])
+}
+
+// ─── General Ledger & Financial Reports ──────────────────────────────────────
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+/// Finer grouping used to lay out the statements and classify cash flows.
+enum AccountSubtype {
+  CASH // cash & cash equivalents: drives the cash flow statement
+  CURRENT_ASSET
+  NON_CURRENT_ASSET
+  CURRENT_LIABILITY
+  NON_CURRENT_LIABILITY
+  EQUITY
+  OPERATING_REVENUE
+  OTHER_INCOME
+  COST_OF_SALES
+  OPERATING_EXPENSE
+  OTHER_EXPENSE
+}
+
+/// One line of the Chart of Accounts.
+model Account {
+  id          Int            @id @default(autoincrement())
+  code        String         @unique // 4 digits; first digit follows the type (1 asset … 7 other)
+  name        String
+  type        AccountType
+  subtype     AccountSubtype
+  description String?
+  /// Set on accounts the system posts to automatically (e.g. "SALES"). They cannot be deactivated.
+  systemKey   String?        @unique
+  isActive    Boolean        @default(true)
+  lines       JournalLine[]
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+}
+
+enum JournalSource {
+  OPENING // opening balances
+  MANUAL // entered by a user (expenses, purchases, capital, ...)
+  POS_SALE // one per completed POS transaction
+  POS_VOID // reverses the POS_SALE entry of a voided transaction
+  CASH_COUNT // cash over / short from an end-of-shift count
+  REVERSAL // reverses a manual entry
+}
+
+/// Immutable, balanced double-entry journal entry. Corrections are made with a
+/// reversing entry, never by editing or deleting.
+model JournalEntry {
+  id          String        @id @default(cuid())
+  number      Int           @unique @default(autoincrement())
+  date        DateTime      @db.Date // Manila business date
+  description String
+  source      JournalSource
+  reference   String?
+
+  /// Source documents. Unique, so a sale or cash count can never be posted twice.
+  transactionId        String?             @unique
+  transaction          Transaction?        @relation(fields: [transactionId], references: [id])
+  cashReconciliationId String?             @unique
+  cashReconciliation   CashReconciliation? @relation(fields: [cashReconciliationId], references: [id])
+
+  /// The entry this one reverses. Unique, so an entry can only be reversed once.
+  reversesId String?       @unique
+  reverses   JournalEntry? @relation("Reversal", fields: [reversesId], references: [id])
+  reversedBy JournalEntry? @relation("Reversal")
+
+  createdById String?
+  createdBy   User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  lines       JournalLine[]
+  createdAt   DateTime      @default(now())
+
+  @@index([date])
+}
+
+model JournalLine {
+  id        Int          @id @default(autoincrement())
+  entryId   String
+  entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  accountId Int
+  account   Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  debit     Decimal      @default(0) @db.Decimal(14, 2)
+  credit    Decimal      @default(0) @db.Decimal(14, 2)
+  memo      String?
+
+  @@index([accountId])
+  @@index([entryId])
+}

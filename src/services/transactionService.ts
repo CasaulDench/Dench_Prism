@@ -2,6 +2,7 @@
 import prisma from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { AuditService } from './auditService';
+import { AccountingService } from './accountingService';
 
 export interface CheckoutCartItem {
   productId: number;
@@ -241,7 +242,10 @@ export class TransactionService {
         },
       });
 
-      // 9. Write to AuditLog
+      // 9. Post to the general ledger (sales, tax, vendor share, cost of goods sold)
+      await AccountingService.postSaleTransaction(tx, createdTx.id);
+
+      // 10. Write to AuditLog
       await AuditService.log(
         {
           userId: cashierId,
